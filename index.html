@@ -1,0 +1,455 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fluid Dynamics Visualization</title>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.8.0/lib/p5.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: Arial, sans-serif;
+        }
+        #canvas-container {
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: center;
+            position: relative;
+        }
+        #info {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 12px;
+            pointer-events: none;
+        }
+    </style>
+
+<base target="_self">
+
+
+    </head><body><div id="canvas-container"></div>
+    <div id="info">Move mouse to interact • Click to add obstacles</div>
+
+    <script>
+        const fluidSim = (p) => {
+            // Simulation parameters
+            let gridSize = 20;
+            let cols, rows;
+            let density = [];
+            let velocityX = [];
+            let velocityY = [];
+            let prevDensity = [];
+            let prevVelocityX = [];
+            let prevVelocityY = [];
+            let colorPalette = [];
+            let obstacles = [];
+            let showStreamlines = true;
+            let showVorticity = false;
+            let viscosity = 0.1;
+            let diffusion = 0.1;
+            let dt = 0.1;
+            let iterations = 10;
+            let particleSystem = [];
+            let maxParticles = 1000;
+            let particleSize = 2;
+            let colorMode = 0; // 0: velocity, 1: density
+
+            p.setup = () => {
+                let canvas = p.createCanvas(p.min(p.windowWidth, 1200), p.min(p.windowHeight, 800));
+                canvas.parent('canvas-container');
+                cols = Math.floor(p.width / gridSize);
+                rows = Math.floor(p.height / gridSize);
+                
+                // Initialize arrays
+                for (let i = 0; i < cols; i++) {
+                    density[i] = new Array(rows).fill(0);
+                    velocityX[i] = new Array(rows).fill(0);
+                    velocityY[i] = new Array(rows).fill(0);
+                    prevDensity[i] = new Array(rows).fill(0);
+                    prevVelocityX[i] = new Array(rows).fill(0);
+                    prevVelocityY[i] = new Array(rows).fill(0);
+                }
+                
+                // Create color palette
+                colorPalette = [
+                    p.color(10, 10, 30),    // Deep blue
+                    p.color(20, 50, 100),    // Ocean blue
+                    p.color(50, 150, 200),   // Sky blue
+                    p.color(200, 200, 100),  // Light yellow
+                    p.color(250, 150, 50),   // Orange
+                    p.color(220, 50, 30)     // Red
+                ];
+                
+                p.colorMode(p.HSB, 360, 100, 100, 1);
+                p.noStroke();
+            };
+
+            p.draw = () => {
+                p.background(0);
+                
+                // Add density and velocity from mouse
+                addSource();
+                
+                // Solve Navier-Stokes equations
+                for (let i = 0; i < iterations; i++) {
+                    diffuse(1, velocityX, prevVelocityX, viscosity);
+                    diffuse(2, velocityY, prevVelocityY, viscosity);
+                    
+                    project(velocityX, velocityY, prevVelocityX, prevVelocityY);
+                    
+                    advect(1, velocityX, prevVelocityX, prevVelocityX, prevVelocityY);
+                    advect(2, velocityY, prevVelocityY, prevVelocityX, prevVelocityY);
+                    
+                    project(velocityX, velocityY, prevVelocityX, prevVelocityY);
+                    
+                    diffuse(0, density, prevDensity, diffusion);
+                    advect(0, density, prevDensity, velocityX, velocityY);
+                }
+                
+                // Update particles
+                updateParticles();
+                
+                // Draw fluid
+                drawFluid();
+                
+                // Draw obstacles
+                drawObstacles();
+                
+                // Draw streamlines or vorticity if enabled
+                if (showStreamlines) drawStreamlines();
+                if (showVorticity) drawVorticity();
+                
+                // Fade out density over time
+                fadeDensity();
+            };
+
+            function addSource() {
+                if (p.mouseX > 0 && p.mouseX < p.width && p.mouseY > 0 && p.mouseY < p.height) {
+                    const i = Math.floor(p.mouseX / gridSize);
+                    const j = Math.floor(p.mouseY / gridSize);
+                    
+                    // Add velocity based on mouse movement
+                    if (p.mouseIsPressed && p.mouseButton === p.LEFT) {
+                        // Add obstacle
+                        if (!obstacles.some(obs => obs.i === i && obs.j === j)) {
+                            obstacles.push({ i, j });
+                        }
+                    } else {
+                        // Add fluid force
+                        const force = 5;
+                        velocityX[i][j] += (p.mouseX - p.pmouseX) * 0.1;
+                        velocityY[i][j] += (p.mouseY - p.pmouseY) * 0.1;
+                        
+                        // Add density (color)
+                        density[i][j] += 10;
+                        
+                        // Add particles
+                        if (particleSystem.length < maxParticles) {
+                            particleSystem.push({
+                                x: p.mouseX,
+                                y: p.mouseY,
+                                vx: (p.mouseX - p.pmouseX) * 0.5 + p.random(-1, 1),
+                                vy: (p.mouseY - p.pmouseY) * 0.5 + p.random(-1, 1),
+                                life: 100 + p.random(50),
+                                hue: p.random(360)
+                            });
+                        }
+                    }
+                }
+            }
+
+            function diffuse(b, x, x0, diff) {
+                const a = dt * diff * (cols - 2) * (rows - 2);
+                for (let k = 0; k < iterations; k++) {
+                    for (let i = 1; i < cols - 1; i++) {
+                        for (let j = 1; j < rows - 1; j++) {
+                            if (isObstacle(i, j)) continue;
+                            
+                            x[i][j] = (x0[i][j] + a * (
+                                x[i-1][j] + x[i+1][j] + 
+                                x[i][j-1] + x[i][j+1]
+                            )) / (1 + 4 * a);
+                        }
+                    }
+                    setBoundary(b, x);
+                }
+            }
+
+            function advect(b, d, d0, u, v) {
+                let dt0 = dt * (cols - 2);
+                for (let i = 1; i < cols - 1; i++) {
+                    for (let j = 1; j < rows - 1; j++) {
+                        if (isObstacle(i, j)) continue;
+                        
+                        let x = i - dt0 * u[i][j];
+                        let y = j - dt0 * v[i][j];
+                        
+                        x = p.constrain(x, 0.5, cols - 1.5);
+                        y = p.constrain(y, 0.5, rows - 1.5);
+                        
+                        const i0 = Math.floor(x);
+                        const i1 = i0 + 1;
+                        const j0 = Math.floor(y);
+                        const j1 = j0 + 1;
+                        
+                        const s1 = x - i0;
+                        const s0 = 1 - s1;
+                        const t1 = y - j0;
+                        const t0 = 1 - t1;
+                        
+                        d[i][j] = s0 * (t0 * d0[i0][j0] + t1 * d0[i0][j1]) + 
+                                  s1 * (t0 * d0[i1][j0] + t1 * d0[i1][j1]);
+                    }
+                }
+                setBoundary(b, d);
+            }
+
+            function project(u, v, p, div) {
+                const h = 1.0 / (cols - 2);
+                for (let i = 1; i < cols - 1; i++) {
+                    for (let j = 1; j < rows - 1; j++) {
+                        if (isObstacle(i, j)) continue;
+                        
+                        div[i][j] = -0.5 * h * (
+                            u[i+1][j] - u[i-1][j] + 
+                            v[i][j+1] - v[i][j-1]
+                        );
+                        p[i][j] = 0;
+                    }
+                }
+                setBoundary(0, div);
+                setBoundary(0, p);
+                
+                for (let k = 0; k < iterations; k++) {
+                    for (let i = 1; i < cols - 1; i++) {
+                        for (let j = 1; j < rows - 1; j++) {
+                            if (isObstacle(i, j)) continue;
+                            
+                            p[i][j] = (div[i][j] + 
+                                      p[i-1][j] + p[i+1][j] + 
+                                      p[i][j-1] + p[i][j+1]) / 4;
+                        }
+                    }
+                    setBoundary(0, p);
+                }
+                
+                for (let i = 1; i < cols - 1; i++) {
+                    for (let j = 1; j < rows - 1; j++) {
+                        if (isObstacle(i, j)) continue;
+                        
+                        u[i][j] -= 0.5 * (p[i+1][j] - p[i-1][j]) / h;
+                        v[i][j] -= 0.5 * (p[i][j+1] - p[i][j-1]) / h;
+                    }
+                }
+                setBoundary(1, u);
+                setBoundary(2, v);
+            }
+
+            function setBoundary(b, x) {
+                for (let i = 1; i < cols - 1; i++) {
+                    x[i][0] = b === 2 ? -x[i][1] : x[i][1];
+                    x[i][rows-1] = b === 2 ? -x[i][rows-2] : x[i][rows-2];
+                }
+                
+                for (let j = 1; j < rows - 1; j++) {
+                    x[0][j] = b === 1 ? -x[1][j] : x[1][j];
+                    x[cols-1][j] = b === 1 ? -x[cols-2][j] : x[cols-2][j];
+                }
+                
+                x[0][0] = 0.5 * (x[1][0] + x[0][1]);
+                x[0][rows-1] = 0.5 * (x[1][rows-1] + x[0][rows-2]);
+                x[cols-1][0] = 0.5 * (x[cols-2][0] + x[cols-1][1]);
+                x[cols-1][rows-1] = 0.5 * (x[cols-2][rows-1] + x[cols-1][rows-2]);
+            }
+
+            function isObstacle(i, j) {
+                return obstacles.some(obs => obs.i === i && obs.j === j);
+            }
+
+            function drawFluid() {
+                for (let i = 0; i < cols; i++) {
+                    for (let j = 0; j < rows; j++) {
+                        if (isObstacle(i, j)) continue;
+                        
+                        const x = i * gridSize;
+                        const y = j * gridSize;
+                        
+                        // Calculate color based on velocity or density
+                        let col;
+                        if (colorMode === 0) {
+                            // Velocity-based color
+                            const speed = p.sqrt(velocityX[i][j] * velocityX[i][j] + velocityY[i][j] * velocityY[i][j]);
+                            const hue = p.map(speed, 0, 2, 200, 360) % 360;
+                            const sat = p.map(speed, 0, 2, 50, 100);
+                            const bri = p.map(speed, 0, 2, 30, 100);
+                            const alpha = p.map(density[i][j], 0, 100, 0, 0.8);
+                            col = p.color(hue, sat, bri, alpha);
+                        } else {
+                            // Density-based color
+                            const d = p.constrain(density[i][j], 0, 100);
+                            const colorIndex = p.floor(p.map(d, 0, 100, 0, colorPalette.length - 1));
+                            const nextIndex = p.min(colorIndex + 1, colorPalette.length - 1);
+                            const amt = p.map(d, 0, 100, 0, 1) % 1;
+                            col = p.lerpColor(colorPalette[colorIndex], colorPalette[nextIndex], amt);
+                            col.setAlpha(p.map(d, 0, 100, 0, 255));
+                        }
+                        
+                        p.fill(col);
+                        p.rect(x, y, gridSize, gridSize);
+                    }
+                }
+            }
+
+            function drawStreamlines() {
+                p.stroke(255, 100);
+                p.strokeWeight(1);
+                
+                const step = 5;
+                for (let x = 0; x < p.width; x += step) {
+                    for (let y = 0; y < p.height; y += step) {
+                        const i = p.floor(x / gridSize);
+                        const j = p.floor(y / gridSize);
+                        
+                        if (i < 0 || i >= cols || j < 0 || j >= rows || isObstacle(i, j)) continue;
+                        
+                        const vx = velocityX[i][j] * gridSize * 2;
+                        const vy = velocityY[i][j] * gridSize * 2;
+                        
+                        if (p.abs(vx) > 0.1 || p.abs(vy) > 0.1) {
+                            p.line(x, y, x + vx, y + vy);
+                        }
+                    }
+                }
+            }
+
+            function drawVorticity() {
+                p.stroke(255, 50);
+                p.strokeWeight(1);
+                
+                for (let i = 1; i < cols - 1; i++) {
+                    for (let j = 1; j < rows - 1; j++) {
+                        if (isObstacle(i, j)) continue;
+                        
+                        const x = i * gridSize;
+                        const y = j * gridSize;
+                        
+                        // Calculate vorticity (curl of velocity field)
+                        const vort = (velocityY[i+1][j] - velocityY[i-1][j] - 
+                                     velocityX[i][j+1] + velocityX[i][j-1]) * 0.5;
+                        
+                        if (p.abs(vort) > 0.2) {
+                            const radius = p.map(p.abs(vort), 0.2, 2, 2, 10);
+                            p.noFill();
+                            p.ellipse(x, y, radius * 2);
+                        }
+                    }
+                }
+            }
+
+            function drawObstacles() {
+                p.fill(50, 50, 50, 200);
+                p.noStroke();
+                
+                for (const obs of obstacles) {
+                    const x = obs.i * gridSize;
+                    const y = obs.j * gridSize;
+                    p.rect(x, y, gridSize, gridSize);
+                }
+            }
+
+            function updateParticles() {
+            for (let idx = particleSystem.length - 1; idx >= 0; idx--) {
+                const part = particleSystem[idx];
+                
+                // Update position
+                part.x += part.vx;
+                part.y += part.vy;
+                
+                // Apply fluid velocity
+                const gridI = Math.floor(part.x / gridSize);
+                const gridJ = Math.floor(part.y / gridSize);
+                
+                if (gridI >= 0 && gridI < cols && gridJ >= 0 && gridJ < rows && !isObstacle(gridI, gridJ)) {
+                    // Use Math.lerp or direct calculation instead of p.lerp
+                    part.vx = part.vx + 0.1 * (velocityX[gridI][gridJ] * gridSize * 2 - part.vx);
+                    part.vy = part.vy + 0.1 * (velocityY[gridI][gridJ] * gridSize * 2 - part.vy);
+                }
+                
+                // Decrease life
+                part.life--;
+                
+                // Remove dead particles
+                if (part.life <= 0 || 
+                    part.x < 0 || part.x > p.width || 
+                    part.y < 0 || part.y > p.height) {
+                    particleSystem.splice(idx, 1);
+                }
+            }
+        }
+
+            function fadeDensity() {
+                for (let i = 0; i < cols; i++) {
+                    for (let j = 0; j < rows; j++) {
+                        density[i][j] *= 0.99;
+                        velocityX[i][j] *= 0.99;
+                        velocityY[i][j] *= 0.99;
+                    }
+                }
+            }
+
+            p.keyPressed = () => {
+                if (p.key === 's') showStreamlines = !showStreamlines;
+                if (p.key === 'v') showVorticity = !showVorticity;
+                if (p.key === 'c') colorMode = (colorMode + 1) % 2;
+                if (p.key === 'r') obstacles = [];
+                if (p.key === ' ') {
+                    // Add random obstacle
+                    const i = p.floor(p.random(cols));
+                    const j = p.floor(p.random(rows));
+                    if (!isObstacle(i, j)) {
+                        obstacles.push({ i, j });
+                    }
+                }
+            };
+
+            p.windowResized = () => {
+                p.resizeCanvas(p.min(p.windowWidth, 1200), p.min(p.windowHeight, 800));
+                cols = Math.floor(p.width / gridSize);
+                rows = Math.floor(p.height / gridSize);
+                
+                // Reinitialize arrays
+                density = [];
+                velocityX = [];
+                velocityY = [];
+                prevDensity = [];
+                prevVelocityX = [];
+                prevVelocityY = [];
+                
+                for (let i = 0; i < cols; i++) {
+                    density[i] = new Array(rows).fill(0);
+                    velocityX[i] = new Array(rows).fill(0);
+                    velocityY[i] = new Array(rows).fill(0);
+                    prevDensity[i] = new Array(rows).fill(0);
+                    prevVelocityX[i] = new Array(rows).fill(0);
+                    prevVelocityY[i] = new Array(rows).fill(0);
+                }
+            };
+        };
+
+        new p5(fluidSim);
+    </script>
+
+              
+          
+                
+          
+              
+</body></html>
